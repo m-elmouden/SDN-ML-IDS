@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SDN Security Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/index.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@2.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/reconnecting-websocket/1.0.0/reconnecting-websocket.min.js"></script>
+    <style>
+        .dashboard { padding: 20px; font-family: Arial; }
+        .row { display: flex; gap: 20px; margin-bottom: 20px; }
+        .card { background: #f5f5f5; padding: 20px; border-radius: 8px; flex: 1; }
+        canvas { max-height: 400px; }
+        .notification {
+            background-color: #ffcc00;
+            color: #333;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            display: none;
+        }
+        .packet-counter {
+            font-weight: bold;
+            margin-top: 10px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <h1>SDN Security Monitoring</h1>
+        
+        <div id="limitNotification" class="notification">
+            Dashboard updates paused: Packet limit reached. The controller is still processing traffic but no longer sending updates to the dashboard.
+        </div>
+        
+        <div class="row">
+            <div class="card">
+                <h3>Real-time Traffic</h3>
+                <canvas id="trafficChart"></canvas>
+                <div class="packet-counter">Packets Processed: <span id="packetCounter">0</span></div>
+            </div>
+            <div class="card">
+                <h3>Attack Types</h3>
+                <canvas id="attackChart"></canvas>
+                <div id="attackTypeInfo" style="margin-top: 10px; text-align: center;">No attacks detected</div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="card">
+                <h3>Recent Decisions</h3>
+                <div id="decisionLog" style="height: 200px; overflow-y: auto;"></div>
+            </div>
+            <div class="card">
+                <h3>System Stats</h3>
+                <div id="stats">
+                    <p>Total Traffic: <span id="totalTraffic">0</span></p>
+                    <p>Attacks Blocked: <span id="blockedCount">0</span></p>
+                    <p>Last Decision: <span id="lastDecision">-</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Use window.location to make WebSocket work both locally and in Docker
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsHost = window.location.hostname === '' ? 'localhost' : window.location.hostname;
+        const wsPort = window.location.port === '' ? '8080' : window.location.port;
+        const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}/ws`;
+        console.log('Connecting to WebSocket at:', wsUrl);
+        const ws = new ReconnectingWebSocket(wsUrl, [], {
+            connectionTimeout: 2000,
+            maxRetries: 10,
+            reconnectionDelayGrowFactor: 1.3
+        });
+        
+        // WebSocket connection events
+        ws.onopen = () => {
+            console.log('WebSocket connection established');
+            document.getElementById('lastDecision').textContent = 'Connected';
+        };
+        
+        ws.onclose = () => {
+            console.log('WebSocket connection closed');
+            document.getElementById('lastDecision').textContent = 'Disconnected';
+        };
+        
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+        
+        // Chart variables
+        let trafficChart, attackChart;
+        let attackData = { ddos: 0, normal: 0 };
+        
+        // Initialize charts
+        function initCharts() {
+            try {
+                // Traffic Chart - simplified without time scale
+                trafficChart = new Chart(document.getElementById('trafficChart'), {
+                    type: 'line',
+                    data: {
+                        labels: [], // We'll use simple labels instead of time
+                        datasets: [{
+                            label: 'Packets/sec',
+                            data: [],
+                            borderColor: '#36a2eb',
+                            backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+
+                // Attack Chart
+                attackChart = new Chart(document.getElementById('attackChart'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['DDoS', 'Normal'],
+                        datasets: [{
+                            data: [attackData.ddos, attackData.normal],
+                            backgroundColor: ['#ff6384', '#4bc0c0']
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'bottom'
+                            }
+                        }
+                    }
+                });
+                
+                console.log('Charts initialized successfully');
+            } catch (error) {
+                console.error('Error initializing charts:', error);
+            }
+        }
+
+        // Attack type descriptions
+        const attackTypes = {
+            0: "BenignTraffic",
+            1: "DDoS-ACK_Fragmentation",
+            2: "DDoS-HTTP_Flood",
+            3: "DDoS-ICMP_Flood",
+            4: "DDoS-ICMP_Fragmentation",
+            5: "DDoS-PSHACK_Flood",
+            6: "DDoS-RSTFINFlood",
+            7: "DDoS-SYN_Flood",
+            8: "DDoS-SlowLoris",
+            9: "DDoS-SynonymousIP_Flood",
+            10: "DDoS-TCP_Flood",
+            11: "DDoS-UDP_Flood",
+            12: "DDoS-UDP_Fragmentation",
+        };            // Update dashboard with new data
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log('Received data:', data);
+            
+            // Check if this is a limit_reached message
+            if (data.type === 'limit_reached') {
+                document.getElementById('limitNotification').style.display = 'block';
+                document.getElementById('packetCounter').textContent = data.total_packets || 0;
+                
+                // Add to decision log
+                const log = document.getElementById('decisionLog');
+                log.innerHTML = `<p>${new Date().toLocaleTimeString()} - <strong>LIMIT REACHED</strong>: ${data.message}</p>` + log.innerHTML;
+                return;
+            }
+            
+            // Update packet counter
+            if (data.total_packets) {
+                document.getElementById('packetCounter').textContent = data.total_packets;
+                document.getElementById('totalTraffic').textContent = data.total_packets;
+            }
+            
+            // Update traffic chart - use packet_count if features[42] is undefined
+            // Default to 1 if no packet count is found to ensure chart updates
+            const packetCount = data.packet_count || 
+                               (data.features && data.features.length > 5 ? data.features[5] : 1);
+            
+            // Update traffic chart with safety check
+            if (trafficChart) {
+                const now = new Date().toLocaleTimeString();
+                trafficChart.data.labels.push(now);
+                trafficChart.data.datasets[0].data.push(packetCount);
+                
+                // Keep only last 20 data points
+                if (trafficChart.data.labels.length > 20) {
+                    trafficChart.data.labels.shift();
+                    trafficChart.data.datasets[0].data.shift();
+                }
+                
+                trafficChart.update('none'); // Update without animation for better performance
+            } else {
+                console.warn('Traffic chart not initialized yet');
+            }
+            
+            // Determine decision - handle different formats of data
+            let decision = data.decision || 'UNKNOWN';
+            if (decision === 'UNKNOWN' && data.is_attack !== undefined) {
+                decision = data.is_attack ? 'BLOCK' : 'ALLOW';
+            }
+            
+            // Get attack type information
+            const attackType = data.attack_type !== undefined ? data.attack_type : 
+                              (data.is_attack ? 1 : 0);
+            const attackTypeText = attackTypes[attackType] || "Unknown Attack";
+            
+            // Update attack stats and last decision
+            if(decision === 'BLOCK' || (attackType > 0 && attackType <= 12)) {
+                attackData.ddos++;
+                document.getElementById('blockedCount').textContent = attackData.ddos;
+                document.getElementById('attackTypeInfo').innerHTML = `<strong>Detected: ${attackTypeText} (Type ${attackType})</strong>`;
+                document.getElementById('lastDecision').textContent = 'BLOCK';
+            } else {
+                // Default to ALLOW for any non-BLOCK decision
+                attackData.normal++;
+                document.getElementById('lastDecision').textContent = decision;
+                if(attackType === 0) {
+                    document.getElementById('attackTypeInfo').innerHTML = "No attacks detected";
+                }
+            }
+            
+            // Always update the chart data
+            if (attackChart) {
+                attackChart.data.datasets[0].data = [attackData.ddos, attackData.normal];
+                attackChart.update('none'); // Update without animation
+            } else {
+                console.warn('Attack chart not initialized yet');
+            }
+            
+            // Update decision log with more information
+            const log = document.getElementById('decisionLog');
+            const timestamp = new Date().toLocaleTimeString();
+            
+            // Format the flow information
+            let flowDetails = '';
+            const flowId = data.flow_id || '';
+            
+            if (flowId.includes('-')) {
+                // Try to extract more meaningful flow information
+                const parts = flowId.split('-');
+                if (parts.length >= 2) {
+                    flowDetails = `${parts[0]}-${parts[1]}`;
+                } else {
+                    flowDetails = flowId;
+                }
+            } else if (data.source_ip && data.destination_ip) {
+                // If we have source and destination IP directly
+                flowDetails = `${data.source_ip}-${data.destination_ip}`;
+            } else if (flowId) {
+                flowDetails = flowId;
+            } else {
+                flowDetails = 'Unknown';
+            }
+            
+            // Format confidence nicely
+            const confidence = data.confidence !== undefined ? 
+                             (typeof data.confidence === 'number' ? (data.confidence * 100).toFixed(1) + '%' : data.confidence) : 
+                             'N/A';
+            
+            // Add to log with complete information
+            log.innerHTML = `<p>${timestamp} - Flow: ${flowDetails} - <strong>${decision}</strong> 
+                            (${attackTypeText}, Confidence: ${confidence})</p>` + log.innerHTML;
+        };
+
+        // Initialize charts when page loads
+        window.onload = initCharts;
+    </script>
+</body>
+</html>

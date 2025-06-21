@@ -1,0 +1,281 @@
+services:
+
+  # Apache Kafka Message Broker
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEP        node server.js
+      "
+    volumes:
+      - ./dashboard:/app
+      - npm-cache:/npm-cache
+      - npm-packages:/npm-packages
+    networks:
+      - sdn-net
+    ports:
+      - "8080:8080"2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+      - sdn-net
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      # Performance tuning
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - sdn-net
+    ports:
+      - "29092:29092"  # External access
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Kafka UI for monitoring (optional)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - sdn-net
+    ports:
+      - "8081:8080"  # Web UI
+
+  ryu-custom:
+    image: osrg/ryu
+    container_name: ryu-controller-custom
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: >
+      sh -c "
+        if [ ! -f /ryu-packages/.packages_installed ]; then
+          # First upgrade pip to a version compatible with Python 2.7
+          pip install --upgrade pip==20.3.4 && 
+          pip install --cache-dir=/pip-cache-ryu --target=/ryu-packages websocket-client==0.57.0 requests==2.27.1 numpy==1.16.6 scipy==1.2.1 scikit-learn==0.20.4 joblib==0.13.2 kafka-python==2.0.2 && 
+          touch /ryu-packages/.packages_installed && 
+          echo 'Ryu packages installed successfully!'
+        else
+          echo 'Using previously installed Ryu packages'
+        fi && 
+        export PYTHONPATH=$PYTHONPATH:/ryu-packages:/app && 
+        cd /app && 
+        ryu-manager --verbose enhanced_ids_kafka
+      "
+    networks:
+      - sdn-net
+    ports:
+      - "6655:6653"
+    volumes:
+      - ./ryu_app:/app
+      - pip-cache-ryu:/pip-cache-ryu
+      - ryu-packages:/ryu-packages
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - FEATURES_TOPIC=features
+      - DECISIONS_TOPIC=decisions
+      - DASHBOARD_WS_URL=ws://dashboard:8080/ws
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  mininet:
+    image: iwaseyusuke/mininet:latest
+    container_name: mininet
+    restart: unless-stopped
+    privileged: true
+    tty: true
+    networks:
+      - sdn-net
+    volumes:
+      - /lib/modules:/lib/modules
+      - ./mininet_scripts:/root/scripts
+    command: >
+      sh -c "
+        apt-get update && 
+        apt-get install -y python3-pip tcpdump hping3 && 
+        pip3 install ryu  && 
+        tail -f /dev/null
+      "
+
+  ml-model:
+    image: python:3.8-slim
+    container_name: ml-model
+    command: >
+      sh -c "
+        if [ ! -f /pip-packages/.packages_installed ]; then
+          apt-get update && \
+          apt-get install -y curl && \
+          pip install --cache-dir=/pip-cache --target=/pip-packages flask numpy scikit-learn joblib xgboost && \
+          touch /pip-packages/.packages_installed && \
+          echo 'Packages installed successfully!'
+        else
+          echo 'Using previously installed packages'
+        fi && \
+        # Ensure curl is permanently installed for health checks
+        apt-get update && apt-get install -y curl && \
+        export PYTHONPATH=$PYTHONPATH:/pip-packages && \
+        python /app/model_server_2.py
+      "
+    volumes:
+      - ./ml_model:/app
+      - pip-cache:/pip-cache
+      - pip-packages:/pip-packages
+    networks:
+      - sdn-net
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ML Consumer Service - processes features from Kafka
+  ml-consumer:
+    image: python:3.9-slim
+    container_name: ml-consumer
+    restart: unless-stopped
+    command: >
+      sh -c "
+        if [ ! -f /ml-consumer-packages/.packages_installed ]; then
+          apt-get update && \
+          apt-get install -y curl && \
+          pip install --cache-dir=/ml-consumer-cache --target=/ml-consumer-packages kafka-python requests numpy && \
+          touch /ml-consumer-packages/.packages_installed && \
+          echo 'ML Consumer packages installed successfully!'
+        else
+          echo 'Using previously installed ML Consumer packages'
+        fi && \
+        export PYTHONPATH=$PYTHONPATH:/ml-consumer-packages && \
+        python /app/ml_consumer.py
+      "
+    volumes:
+      - ./ml_model:/app
+      - ml-consumer-cache:/ml-consumer-cache
+      - ml-consumer-packages:/ml-consumer-packages
+    networks:
+      - sdn-net
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - FEATURES_TOPIC=features
+      - DECISIONS_TOPIC=decisions
+      - CONSUMER_GROUP_ID=ml-consumer-group
+      - ML_API_URL=http://ml-model:5000/predict
+      - ML_HEALTH_URL=http://ml-model:5000/health
+      - LOG_LEVEL=INFO
+    depends_on:
+      kafka:
+        condition: service_healthy
+      ml-model:
+        condition: service_healthy
+
+  dashboard:
+    image: node:16
+    container_name: dashboard
+    command: >
+      sh -c "
+        cd /app && 
+        if [ ! -f /npm-packages/.packages_installed ]; then
+          npm init -y && 
+          npm install --cache /npm-cache --prefix /npm-packages ws && 
+          touch /npm-packages/.packages_installed && 
+          echo 'Dashboard npm packages installed successfully!'
+        else
+          echo 'Using previously installed dashboard npm packages'
+        fi && 
+        export NODE_PATH=/npm-packages/node_modules && 
+        node server.js
+      "
+    volumes:
+      - ./dashboard:/app
+      - npm-cache:/npm-cache
+      - npm-packages:/npm-packages
+    networks:
+      - sdn-net
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - DECISIONS_TOPIC=decisions
+      - CONSUMER_GROUP_ID=dashboard-consumer-group
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - sdn-net
+    ports:
+      - "9000:9000"  # Web interface
+
+networks:
+  sdn-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
+volumes:
+  portainer_data: {}
+  pip-cache: {}
+  pip-packages: {}
+  pip-cache-ryu: {}
+  ryu-packages: {}
+  npm-cache: {}
+  npm-packages: {}
+  # Kafka volumes
+  zookeeper-data: {}
+  zookeeper-logs: {}
+  kafka-data: {}
+  # ML Consumer volumes
+  ml-consumer-cache: {}
+  ml-consumer-packages: {}

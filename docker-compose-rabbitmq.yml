@@ -1,0 +1,225 @@
+services:
+
+  # RabbitMQ Message Broker with Management UI
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - sdn-net
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI port
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  ryu-controller-custom:
+    image: osrg/ryu
+    container_name: ryu-controller-custom
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: >
+      sh -c "
+        if [ ! -f /ryu-packages/.packages_installed ]; then
+          pip install --upgrade pip==20.3.4 && \
+          pip install --cache-dir=/pip-cache-ryu --target=/ryu-packages websocket-client==0.57.0 requests==2.27.1 numpy==1.16.6 scipy==1.2.1 scikit-learn==0.20.4 joblib==0.13.2 pika==1.1.0 && \
+          touch /ryu-packages/.packages_installed && \
+          echo 'Ryu packages installed successfully!'
+        else
+          echo 'Using previously installed Ryu packages'
+        fi && \
+        cd /app && \
+        echo 'Starting Ryu controller with OpenFlow server...' && \
+        ryu-manager --verbose --ofp-tcp-listen-port 6653 --ofp-listen-host 0.0.0.0 enhanced_ids_rabbitmq.py
+      "
+    networks:
+      - sdn-net
+    ports:
+      - "6653:6653"
+    volumes:
+      - ./ryu_app:/app
+      - pip-cache-ryu:/pip-cache-ryu
+      - ryu-packages:/ryu-packages
+    environment:
+      - PYTHONPATH=/ryu-packages:/app
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - FEATURES_QUEUE=features
+      - DECISIONS_QUEUE=decisions
+      - DASHBOARD_WS_URL=ws://dashboard:8080/ws
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  mininet:
+    image: iwaseyusuke/mininet:latest
+    container_name: mininet
+    restart: unless-stopped
+    privileged: true
+    tty: true
+    networks:
+      - sdn-net
+    volumes:
+      - /lib/modules:/lib/modules
+      - ./mininet_scripts:/root/scripts
+    command: >
+      sh -c "
+        apt-get update && \
+        apt-get install -y python3-pip tcpdump hping3 && \
+        pip3 install ryu && \
+        tail -f /dev/null
+      "
+    depends_on:
+      - ryu-controller-custom
+
+  ml-model:
+    image: python:3.8-slim
+    container_name: ml-model
+    restart: unless-stopped
+    command: >
+      sh -c "
+        if [ ! -f /pip-packages/.packages_installed ]; then
+          apt-get update && \
+          apt-get install -y curl && \
+          pip install --cache-dir=/pip-cache --target=/pip-packages flask numpy scikit-learn joblib xgboost && \
+          touch /pip-packages/.packages_installed && \
+          echo 'Packages installed successfully!'
+        else
+          echo 'Using previously installed packages'
+        fi && \
+        apt-get update && apt-get install -y curl && \
+        python /app/model_server_2.py
+      "
+    volumes:
+      - ./ml_model:/app
+      - pip-cache:/pip-cache
+      - pip-packages:/pip-packages
+    networks:
+      - sdn-net
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      - PYTHONPATH=/pip-packages
+
+  # ML Consumer Service - processes features from RabbitMQ
+  ml-consumer:
+    image: python:3.9-slim
+    container_name: ml-consumer
+    restart: unless-stopped
+    command: >
+      sh -c "
+        if [ ! -f /ml-consumer-packages/.packages_installed ]; then
+          apt-get update && \
+          apt-get install -y curl && \
+          pip install --cache-dir=/ml-consumer-cache --target=/ml-consumer-packages pika requests numpy && \
+          touch /ml-consumer-packages/.packages_installed && \
+          echo 'ML Consumer packages installed successfully!'
+        else
+          echo 'Using previously installed ML Consumer packages'
+        fi && \
+        python /app/ml_consumer_rabbitmq.py
+      "
+    volumes:
+      - ./ml_model:/app
+      - ml-consumer-cache:/ml-consumer-cache
+      - ml-consumer-packages:/ml-consumer-packages
+    networks:
+      - sdn-net
+    environment:
+      - PYTHONPATH=/ml-consumer-packages
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - FEATURES_QUEUE=features
+      - DECISIONS_QUEUE=decisions
+      - ML_API_URL=http://ml-model:5000/predict
+      - ML_HEALTH_URL=http://ml-model:5000/health
+      - LOG_LEVEL=INFO
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      ml-model:
+        condition: service_healthy
+
+  dashboard:
+    image: node:16
+    container_name: dashboard
+    restart: unless-stopped
+    command: >
+      sh -c "
+        cd /app && \
+        if [ ! -f /npm-packages/.packages_installed ]; then
+          npm init -y && \
+          npm install --cache /npm-cache --prefix /npm-packages ws amqplib && \
+          touch /npm-packages/.packages_installed && \
+          echo 'Dashboard npm packages installed successfully!'
+        else
+          echo 'Using previously installed dashboard npm packages'
+        fi && \
+        export NODE_PATH=/npm-packages/node_modules && \
+        node server_rabbitmq.js
+      "
+    volumes:
+      - ./dashboard:/app
+      - npm-cache:/npm-cache
+      - npm-packages:/npm-packages
+    networks:
+      - sdn-net
+    ports:
+      - "8080:8080"
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - DECISIONS_QUEUE=decisions
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - sdn-net
+    ports:
+      - "9000:9000"
+
+networks:
+  sdn-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
+volumes:
+  portainer_data: {}
+  pip-cache: {}
+  pip-packages: {}
+  pip-cache-ryu: {}
+  ryu-packages: {}
+  npm-cache: {}
+  npm-packages: {}
+  rabbitmq-data: {}
+  ml-consumer-cache: {}
+  ml-consumer-packages: {}
