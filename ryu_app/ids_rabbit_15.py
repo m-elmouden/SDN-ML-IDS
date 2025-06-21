@@ -322,6 +322,38 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
             self.logger.error("Failed to connect to dashboard WebSocket: {0}".format(e))
             self.ws_connected = False
 
+
+
+    def get_flow_id_2(self, pkt):
+        """
+        Generate a flow identifier based on IPs and protocol, grouping all packets between two hosts.
+        Falls back to protocol-only for non-IP traffic.
+        """
+        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        if not ip_pkt:
+            # Non-IPv4 traffic: use timestamp to distinguish
+            return "NONIP-{}".format(int(time.time() * 1000))
+
+        src_ip = ip_pkt.src
+        dst_ip = ip_pkt.dst
+        proto = ip_pkt.proto
+
+        # Order IPs lexicographically for bidirectional grouping
+        ip_pair = (src_ip, dst_ip) if src_ip < dst_ip else (dst_ip, src_ip)
+
+        # Base flow key: IP pair + protocol
+        flow_key = "{}-{}-{}".format(ip_pair[0], ip_pair[1], proto)
+
+        # Optionally include ports for finer granularity
+        # Uncomment to include port numbers:
+        # port_proto = pkt.get_protocol(tcp.tcp) or pkt.get_protocol(udp.udp)
+        # if port_proto:
+        #     sport = port_proto.src_port
+        #     dport = port_proto.dst_port
+        #     flow_key = "{}:{}-{}:{}-{}".format(ip_pair[0], sport, ip_pair[1], dport, proto)
+
+        return flow_key       
+
     def get_flow_id(self, pkt):
         """Generate a unique identifier for a flow based on packet information"""
         ip = pkt.get_protocol(ipv4.ipv4)
@@ -581,7 +613,7 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
         self.mac_to_port[dpid][src] = in_port
 
         # Get consistent flow ID
-        flow_id = self.get_flow_id(pkt)
+        flow_id = self.get_flow_id_2(pkt)
 
         # Parse packet for window storage
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
@@ -648,6 +680,8 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
         self.forward_without_install(msg, datapath, in_port, eth, dst, src)
 
         # Process window when we have required number of packets
+        L = len(self.flow_windows[flow_id])
+        self.logger.info("Flow %s window size = %d", flow_id, L)
         if len(self.flow_windows[flow_id]) >= self.window_size:
             try:
                 # Extract aggregated features (15 features)
