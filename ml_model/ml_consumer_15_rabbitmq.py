@@ -38,12 +38,11 @@ class MLConsumer15RabbitMQ:
         # Consumer configuration
         self.max_retries = int(os.getenv('MAX_RETRIES', '5'))
         self.retry_delay = int(os.getenv('RETRY_DELAY', '5'))
-        
-        # Expected feature names for validation (15 features)
+          # Expected feature names for validation (15 features)
         self.expected_features = [
             'fin_flag_number', 'psh_flag_number', 'UDP', 'syn_flag_number', 'HTTP',
-            'ICMP', 'IAT', 'Tot_sum', 'urg_count', 'syn_count',
-            'fin_count', 'rst_flag_number', 'TCP', 'ack_count', 'Rate'
+            'ICMP', 'Tot_sum', 'IAT', 'rst_count', 'Weight',
+            'rst_flag_number', 'flow_duration', 'TCP', 'Rate', 'ARP'
         ]
         
         # RabbitMQ connection components

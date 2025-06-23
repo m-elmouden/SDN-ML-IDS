@@ -27,8 +27,8 @@ scaler_15 = None
 # Feature names for the 15-feature model
 FEATURE_NAMES_15 = [
     'fin_flag_number', 'psh_flag_number', 'UDP', 'syn_flag_number', 'HTTP',
-    'ICMP', 'IAT', 'Tot_sum', 'urg_count', 'syn_count',
-    'fin_count', 'rst_flag_number', 'TCP', 'ack_count', 'Rate'
+    'ICMP', 'Tot sum', 'IAT', 'rst_count', 'Weight',
+    'rst_flag_number', 'flow_duration', 'TCP', 'Rate', 'ARP'
 ]
 
 def load_models():
@@ -37,7 +37,7 @@ def load_models():
     
     try:
         # Load 15-feature model
-        model_15_path = '/app/xgb_model_15.joblib'
+        model_15_path = '/app/xgb_model_15_2.joblib'
         if os.path.exists(model_15_path):
             model_15 = joblib.load(model_15_path)
             logger.info(f"Loaded 15-feature model from {model_15_path}")

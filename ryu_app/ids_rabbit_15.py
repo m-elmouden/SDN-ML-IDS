@@ -6,7 +6,6 @@ import json
 import os
 import threading
 from collections import defaultdict
-import numpy as np
 
 # Ryu imports
 from ryu.base import app_manager
@@ -71,13 +70,11 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
         self.rabbitmq_connection = None
         self.producer_channel = None
         self.consumer_channel = None
-        self.rabbitmq_connected = False
-    
-        # Feature names for reference (15 features)
+        self.rabbitmq_connected = False        # Feature names for reference (15 features)
         self.feature_names = [
             'fin_flag_number', 'psh_flag_number', 'UDP', 'syn_flag_number', 'HTTP',
-            'ICMP', 'IAT', 'Tot_sum', 'urg_count', 'syn_count',
-            'fin_count', 'rst_flag_number', 'TCP', 'ack_count', 'Rate'
+            'ICMP', 'Tot_sum', 'IAT', 'rst_count', 'Weight',
+            'rst_flag_number', 'flow_duration', 'TCP', 'Rate', 'ARP'
         ]
         
         # Application port mappings for protocol detection
@@ -433,15 +430,20 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
         timestamps = [pkt['time'] for pkt in window]
         
         # Protocol counters
-        tcp_count = udp_count = icmp_count = 0
+        tcp_count = udp_count = icmp_count = arp_count = 0
         http_count = 0
         
         # Flag counters
         syn_count = ack_count = fin_count = rst_count = 0
-        psh_count = urg_count = 0
+        psh_count = 0
         
         # Packet length statistics for total sum
         packet_lengths = []
+        
+        # Direction tracking for weight calculation
+        first_packet_src_ip = None
+        incoming_packets = 0
+        outgoing_packets = 0
         
         # Process each packet in the window
         for pkt in window:
@@ -460,6 +462,10 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
             # Get application protocols
             if 'app_protocols' in pkt:
                 http_count += pkt['app_protocols'].get('HTTP', 0)
+            
+            # Count ARP packets
+            if pkt.get('is_arp', False):
+                arp_count += 1
                 
             # Count TCP flags
             if 'tcp_flags' in pkt:
@@ -474,13 +480,22 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
                     rst_count += 1
                 if flags.get('PSH', 0):
                     psh_count += 1
-                if flags.get('URG', 0):
-                    urg_count += 1
+            
+            # Track packet direction for weight calculation
+            src_ip = pkt.get('src_ip')
+            if src_ip:
+                if first_packet_src_ip is None:
+                    first_packet_src_ip = src_ip
+                    outgoing_packets += 1
+                elif src_ip == first_packet_src_ip:
+                    outgoing_packets += 1
+                else:
+                    incoming_packets += 1
         
         # Calculate 15 features according to the specified order:
         # ['fin_flag_number', 'psh_flag_number', 'UDP', 'syn_flag_number', 'HTTP',
-        #  'ICMP', 'IAT', 'Tot_sum', 'urg_count', 'syn_count',
-        #  'fin_count', 'rst_flag_number', 'TCP', 'ack_count', 'Rate']
+        #  'ICMP', 'Tot_sum', 'IAT', 'rst_count', 'Weight',
+        #  'rst_flag_number', 'flow_duration', 'TCP', 'Rate', 'ARP']
         
         # 0. fin_flag_number - 1 if FIN flag present in any packet
         features[0] = 1 if fin_count > 0 else 0
@@ -500,34 +515,39 @@ class EnhancedIDSController15RabbitMQ(app_manager.RyuApp):
         # 5. ICMP - 1 if ICMP packets present
         features[5] = 1 if icmp_count > 0 else 0
         
-        # 6. IAT - Mean inter-arrival time
-        features[6] = np.mean(np.diff(timestamps)) if len(timestamps) > 1 else 0
+        # 6. Tot_sum - Sum of packet sizes in flow
+        features[6] = sum(packet_lengths)
+          # 7. IAT - Mean inter-arrival time
+        if len(timestamps) > 1:
+            time_diffs = []
+            for i in range(1, len(timestamps)):
+                time_diffs.append(timestamps[i] - timestamps[i-1])
+            features[7] = sum(time_diffs) / len(time_diffs)
+        else:
+            features[7] = 0
         
-        # 7. Tot_sum - Sum of packet sizes in flow
-        features[7] = sum(packet_lengths)
+        # 8. rst_count - Count of RST flags
+        features[8] = rst_count
         
-        # 8. urg_count - Count of URG flags
-        features[8] = urg_count
+        # 9. Weight - Product of incoming and outgoing packets
+        features[9] = incoming_packets * outgoing_packets
         
-        # 9. syn_count - Count of SYN flags
-        features[9] = syn_count
+        # 10. rst_flag_number - 1 if RST flag present in any packet
+        features[10] = 1 if rst_count > 0 else 0
         
-        # 10. fin_count - Count of FIN flags
-        features[10] = fin_count
-        
-        # 11. rst_flag_number - 1 if RST flag present in any packet
-        features[11] = 1 if rst_count > 0 else 0
+        # 11. flow_duration - Time between first and last packet
+        features[11] = timestamps[-1] - timestamps[0] if len(timestamps) > 1 else 0
         
         # 12. TCP - 1 if TCP packets present
         features[12] = 1 if tcp_count > 0 else 0
         
-        # 13. ack_count - Count of ACK flags
-        features[13] = ack_count
-        
-        # 14. Rate - Overall packet transmission rate
-        duration = timestamps[-1] - timestamps[0] if len(timestamps) > 1 else 0
+        # 13. Rate - Overall packet transmission rate
+        duration = features[11]  # Use the calculated flow_duration
         num_packets = len(window)
-        features[14] = num_packets / duration if duration > 0 else 0
+        features[13] = num_packets / duration if duration > 0 else 0
+        
+        # 14. ARP - 1 if ARP packets present
+        features[14] = 1 if arp_count > 0 else 0
         
         return features
 

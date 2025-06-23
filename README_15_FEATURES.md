@@ -12,15 +12,15 @@ The system extracts and processes these 15 key features from network traffic:
 4. **syn_flag_number** - Presence of SYN flag in TCP packets
 5. **HTTP** - Presence of HTTP protocol traffic
 6. **ICMP** - Presence of ICMP protocol packets
-7. **IAT** - Inter-arrival time between packets
-8. **Tot_sum** - Total sum of packet sizes in the flow
-9. **urg_count** - Count of URG flags
-10. **syn_count** - Count of SYN flags
-11. **fin_count** - Count of FIN flags
-12. **rst_flag_number** - Presence of RST flag in TCP packets
+7. **Tot sum** - Total sum of packet sizes in the flow
+8. **IAT** - Inter-arrival time between packets
+9. **rst_count** - Count of RST flags
+10. **Weight** - Product of incoming and outgoing packets
+11. **rst_flag_number** - Presence of RST flag in TCP packets
+12. **flow_duration** - Time duration between first and last packet
 13. **TCP** - Presence of TCP protocol packets
-14. **ack_count** - Count of ACK flags
-15. **Rate** - Overall packet transmission rate
+14. **Rate** - Overall packet transmission rate
+15. **ARP** - Presence of ARP protocol packets
 
 ## System Architecture
 
